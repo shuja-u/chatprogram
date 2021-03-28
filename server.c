@@ -18,10 +18,8 @@
 #include <unistd.h>
 #include <errno.h>
 #include <pthread.h>
-#include <signal.h>
-#include <sys/wait.h>
 
-#define MAXBUFFERSIZE 2049
+#define MAXBUFFERSIZE 2050
 #define BACKLOG 20
 #define MAX_ONLINE_USERS 10
 #define SET_SIZE 100
@@ -165,8 +163,6 @@ void receive(int socket_fd, char message[], int message_len);
 
 void send_to(int socket_fd, char message[], int message_len);
 
-void print_checksum(unsigned char checksum[]);
-
 void sigchld_handler(int s);
 
 struct sockaddr socket_helper(int *socket_fd, int family, int socket_type,
@@ -221,6 +217,7 @@ struct sockaddr socket_helper(int *socket_fd, int family, int socket_type,
         {
             close(*socket_fd);
             perror("Couldn't connect");
+            continue;
         }
         break;
     }
@@ -285,16 +282,6 @@ void send_to(int socket_fd, char message[], int message_len)
     }
 }
 
-void sigchld_handler(int s)
-{
-    // waitpid() might overwrite errno, so we save and restore it:
-    int saved_errno = errno;
-
-    while(waitpid(-1, NULL, WNOHANG) > 0);
-
-    errno = saved_errno;
-}
-
 void conn_handler(int client_fd)
 {
     char username[MAX_USERNAME];
@@ -307,7 +294,8 @@ void conn_handler(int client_fd)
         close(client_fd);
         return;
     }
-
+    
+    send_to(client_fd, READY_TO_RECEIVE, strlen(READY_TO_RECEIVE));
     receive(client_fd, username, MAX_USERNAME - 1);
 
     userlinkedlist *userclient = contains(users, username);
@@ -365,15 +353,17 @@ void conn_handler(int client_fd)
         }
     }
 
-    int keep_alive = 1;
+    printf("User %s logged in\n", username);
 
-    while (keep_alive)
+    send_to(client_fd, READY_TO_RECEIVE, strlen(READY_TO_RECEIVE));   
+
+    while (1)
     {
         receive(client_fd, message, MAX_COMMAND_SIZE - 1);
         if (strcmp(PUBLIC_MESSAGE, message) == 0)
         {
             send_to(client_fd, READY_TO_RECEIVE, strlen(READY_TO_RECEIVE));
-            receive(client_fd, message, MAXBUFFERSIZE - 1);
+            receive(client_fd, message, MAXBUFFERSIZE - 2);
             for(index = 0; index < MAX_ACTIVE_USERS; index++)
             {
                 if (active_users[index] != NULL)
@@ -405,7 +395,7 @@ void conn_handler(int client_fd)
                 if (active_users[index] != NULL && strcmp(message, active_users[index]->username) == 0)
                 {
                     send_to(client_fd, READY_TO_RECEIVE, strlen(READY_TO_RECEIVE));
-                    receive(client_fd, message, MAXBUFFERSIZE - 1);
+                    receive(client_fd, message, MAXBUFFERSIZE - 2);
                     int bytes_sent = send(active_users[index]->user_fd, message, strlen(message), 0);
                     if (bytes_sent != -1)
                     {
@@ -437,6 +427,11 @@ void conn_handler(int client_fd)
             close(client_fd);
             return;
         }
+        else
+        {
+            printf("Not a command\n");
+            exit(1);
+        }
     }
 }
 
@@ -451,7 +446,6 @@ int main (int argc, char *argv[]) {
     struct sockaddr_storage client_address;
     socklen_t addr_len = sizeof client_address;
     pthread_t thread;
-    struct sigaction sa;    
     init_hash_set(users);
 
     socket_helper(&server_fd, AF_INET, SOCK_STREAM, AI_PASSIVE, NULL, argv[1]);
@@ -488,14 +482,6 @@ int main (int argc, char *argv[]) {
     }
 
     printf("listening\n");
-
-    sa.sa_handler = sigchld_handler; // reap all dead processes
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART;
-    if (sigaction(SIGCHLD, &sa, NULL) == -1) {
-        perror("sigaction");
-        exit(1);
-    }
     
     while (1)
     {
