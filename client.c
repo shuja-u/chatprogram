@@ -11,6 +11,7 @@
 
 #include <sys/socket.h>
 #include <stdio.h>
+#include <stdio_ext.h>
 #include <sys/types.h>
 #include <netdb.h>
 #include <string.h>
@@ -21,23 +22,28 @@
 
 #define MAXBUFFERSIZE 2050
 #define BACKLOG 20
-#define MAX_ONLINE_USERS 10
-#define SET_SIZE 100
+#define MAX_ONLINE_USERS 20
+#define TABLE_SIZE 100
 #define MAX_USERNAME 51
 #define MAX_PASSWORD 101
 #define USERFILE "users"
-#define MAX_ACTIVE_USERS 20
+#define MAX_ACTIVE_USERS 20 // No more than 40, or active username list will be too large to send.
 #define SERVER_FULL "SFC"
 #define USER_FOUND "UFC"
 #define USER_NOT_FOUND "UNFC"
+#define USER_ALREADY_ONLINE "UAOC"
+#define USER_OFFLINE "UOC"
 #define INCORRECT_PASSWORD "IPWC"
 #define PUBLIC_MESSAGE "PMC"
 #define DIRECT_MESSAGE "DMC"
 #define EXIT "EXC"
 #define READY_TO_RECEIVE "RTRC"
 #define MESSAGE_SENT "MSC"
-#define MAX_COMMAND_SIZE 11
+#define NO_ACTIVE_USERS "NAUC"
+#define MAX_COMMAND_SIZE 5
 #define MAX_COMMANDS_BUFFER 50
+
+int stay_alive = 1;
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
@@ -64,6 +70,8 @@ void fifoadd(char *message)
         full = 1;
     }
 
+    pthread_cond_broadcast(&cond);
+    
     pthread_mutex_unlock(&lock);
     return;
 }
@@ -77,11 +85,13 @@ char *fifopop()
         pthread_cond_wait(&cond, &lock);
     }
 
-    char *message;
-    message = circular_command_fifo[tail];
+    char *message = circular_command_fifo[tail];
     tail = (tail + 1) % MAX_COMMANDS_BUFFER;
 
+    pthread_cond_broadcast(&cond);
+
     pthread_mutex_unlock(&lock);
+    //printf("Removed: %s\n", message);
     return message;
 }
 
@@ -200,6 +210,11 @@ void receive(int socket_fd, char message[], int message_len)
         exit(1);
     }
 
+    if(bytes_received < 1)
+    {
+        exit(0);
+    }
+
     message[bytes_received] = '\0';
 }
 
@@ -226,96 +241,178 @@ void send_to(int socket_fd, char message[], int message_len)
     }
 }
 
-void *command_handler(void *client_fd)
+void get_command(char *buffer)
 {
-    int socket_fd = * (int *) client_fd;
-    free(client_fd);
-    char *message;
+    fgets(buffer, MAX_COMMAND_SIZE, stdin);
+    buffer[strlen(buffer) - 1] = 'C';
+    __fpurge(stdin);  
+}
 
-    while(1)
+void get_username(char *buffer)
+{
+    fgets(buffer, MAX_USERNAME, stdin);
+    while(strlen(buffer) < 2)
+    {
+        printf("Username must be at least one character. Try again:\n");
+        fgets(buffer, MAX_USERNAME, stdin);
+    }
+    buffer[strlen(buffer) - 1] = '\0';
+    __fpurge(stdin);
+}
+
+void get_password(char *buffer)
+{
+    fgets(buffer, MAX_PASSWORD, stdin);
+    while(strlen(buffer) < 2)
+    {
+        printf("Password must be at least one character. Try again:\n");
+        fgets(buffer, MAX_PASSWORD, stdin);
+    }
+    buffer[strlen(buffer) - 1] = '\0';
+    __fpurge(stdin);
+}
+
+void get_message(char *buffer)
+{
+    fgets(buffer, MAXBUFFERSIZE - 1, stdin);
+    while(strlen(buffer) < 2)
+    {
+        printf("Message must be at least one character. Try again:\n");
+        fgets(buffer, MAXBUFFERSIZE - 1, stdin);
+    }
+    buffer[strlen(buffer) - 1] = 'D';
+    __fpurge(stdin);
+}
+
+void public_message(int socket_fd)
+{
+    send_to(socket_fd, PUBLIC_MESSAGE, strlen(PUBLIC_MESSAGE));
+    char *message = fifopop();
+
+    if(strcmp(message, NO_ACTIVE_USERS) == 0)
+    {
+        free(message);
+        printf("No other users online.\n");
+        return;
+    }
+
+    printf("Enter message:\n");
+
+    get_message(message);
+
+    send_to(socket_fd, message, strlen(message));
+    free(message);
+    message = fifopop();
+
+    if(strcmp(message, MESSAGE_SENT) == 0)
+    {
+        printf("Message sent.\n");
+    }
+    else
+    {
+        printf("Send failed%s.\n", message);
+    }
+    free(message);
+}
+
+void direct_message(int socket_fd)
+{
+    send_to(socket_fd, DIRECT_MESSAGE, strlen(DIRECT_MESSAGE));
+    // List of active users
+    char *message = fifopop();
+
+    if (strcmp(message, NO_ACTIVE_USERS) == 0)
+    {
+        free(message);
+        printf("\nNo other users online.\n\n");
+        return;
+    }
+
+    // Remove trailing C
+    message[strlen(message) - 1] = '\0';
+
+    printf("\nActive users:\n%s\nChoose user:\n", message);
+
+    // Choose a user
+    get_username(message);
+
+    // Send chosen user
+    send_to(socket_fd, message, strlen(message));
+    free(message);
+
+    // Message could be RTRC/UNFC/UOC
+    message = fifopop();
+
+    if(strcmp(message, READY_TO_RECEIVE) == 0)
+    {
+        printf("Enter message:\n");
+        // Prompt user for message
+        get_message(message);
+
+        // Send direct message
+        send_to(socket_fd, message, strlen(message));
+        free(message);
+
+        // Get confirmation
+        message = fifopop();
+
+        if(strcmp(message, MESSAGE_SENT) == 0)
+        {
+            free(message);
+            printf("Message sent.\n");
+            return;
+        }
+        free(message);
+        printf("Message failed. User no longer online.\n");
+        return;
+    }
+
+    if(strcmp(message, USER_NOT_FOUND) == 0)
+    {
+        free(message);
+        printf("User does not exist.\n");
+        return;
+    }
+
+    if(strcmp(message, USER_OFFLINE) == 0)
+    {
+        free(message);
+        printf("User offline.\n");
+        return;
+    }
+}
+
+void *command_handler(void *p_client_fd)
+{
+    int socket_fd = * (int *) p_client_fd;
+    char command[MAX_COMMAND_SIZE];
+
+    printf("You are connected.\n");
+
+    while(stay_alive)
     {
         printf("PM = PUBLIC MESSAGE | DM = DIRECT MESSAGE | EX = EXIT\nEnter command:\n");
-        fgets(message, MAXBUFFERSIZE - 1, stdin);
-        message[strlen(message) - 1] = 'C';
+        get_command(command);
 
-        if(strcmp(message, PUBLIC_MESSAGE) == 0)
+        if(strcmp(command, PUBLIC_MESSAGE) == 0)
         {
-            send_to(socket_fd, message, strlen(PUBLIC_MESSAGE));
-            message = fifopop();
-            if(strcmp(message, READY_TO_RECEIVE) != 0)
-            {
-                printf("Expected message: ready to receive | Received: %s\n", message);
-                exit(1);
-            }
-
-            printf("Enter message:\n");
-
-            fgets(message, MAXBUFFERSIZE - 1, stdin);
-            message[strlen(message) - 1] = 'D';
-            
-            send_to(socket_fd, message, strlen(message));
-            message = fifopop();
-
-            if(strcmp(message, MESSAGE_SENT) == 0)
-            {
-                printf("Message sent.\n");
-            }
-            else
-            {
-                printf("Send failed.\n");
-            }
+            public_message(socket_fd);
         }
-        else if (strcmp(message, DIRECT_MESSAGE) == 0)
+        else if (strcmp(command, DIRECT_MESSAGE) == 0)
         {
-            // Send DIRECT MESSAGE command
-            send_to(socket_fd, message, strlen(DIRECT_MESSAGE));
-            // Receive list of active users
-            message = fifopop();
-
-            printf("%sChoose user:\n", message);
-
-            // Choose a user
-            fgets(message, MAX_USERNAME, stdin);
-            message[strlen(message) - 1] = '\0';
-
-            // Send chosen user
-            send_to(socket_fd, message, strlen(message));
-            // Message could be READY TO RECEIVE or USER NOT FOUND
-            message = fifopop();
-
-            if(strcmp(message, READY_TO_RECEIVE) == 0)
-            {
-                // Get message from user
-                fgets(message, MAXBUFFERSIZE - 1, stdin);
-                message[strlen(message) - 1] = 'D';
-
-                // Send direct message
-                send_to(socket_fd, message, strlen(message));
-                // Get confirmation
-                message = fifopop();
-
-                if(strcmp(message, MESSAGE_SENT))
-                {
-                    printf("Message sent.\n");
-                    continue;
-                }
-                printf("User no longer online.\n");
-                continue;
-            }
-            printf("Invalid user.\n");
+            direct_message(socket_fd);
         }
-        else if (strcmp(message, EXIT) == 0)
+        else if (strcmp(command, EXIT) == 0)
         {
-            send_to(socket_fd, message, strlen(EXIT));
-            printf("Terminating connection...\n");
-            close(socket_fd);
+            stay_alive = 0;
+            send_to(socket_fd, EXIT, strlen(EXIT));
+            close(socket_fd);            
             return NULL;
         }
         else
         {
             printf("--INVALID COMMAND--\n");
         }
-
     }
 }
 
@@ -329,31 +426,28 @@ int main(int argc, char *argv[])
 
     char username[MAX_USERNAME];
     char password[MAX_PASSWORD];
-    char *message;
+    char command[MAX_COMMAND_SIZE];
     int socket_fd;
+    printf("Creating socket...\n");
     socket_helper(&socket_fd, AF_INET, SOCK_STREAM, 0, argv[1], argv[2]);
+    printf("Socket ready.\n");
 
-    /*
-     * Check if the passed argument is a file, if it is change the value of
-     * message to the file's contents and get its length. Otherwise just get
-     * the passed argument's length.
-     */
+    receive(socket_fd, command, MAX_COMMAND_SIZE - 1);
 
-    receive(socket_fd, message, MAXBUFFERSIZE - 2);
-
-    if(strcmp(message, SERVER_FULL) == 0)
+    if(strcmp(command, SERVER_FULL) == 0)
     {
         close(socket_fd);
         exit(1);
     }
 
-    fgets(username, MAX_USERNAME, stdin);
-    username[strlen(username) - 1] = '\0'; 
+    printf("Connected.\nEnter username:\n");
+
+    get_username(username);
 
     send_to(socket_fd, username, strlen(username));
-    receive(socket_fd, message, MAX_COMMAND_SIZE - 1);
+    receive(socket_fd, command, MAX_COMMAND_SIZE - 1);
 
-    if(strcmp(message, USER_NOT_FOUND) == 0)
+    if(strcmp(command, USER_NOT_FOUND) == 0)
     {
         printf("User not found.\nCreating new user...\nEnter new user password:\n");
     }
@@ -362,46 +456,86 @@ int main(int argc, char *argv[])
         printf("User found.\nEnter password:\n");
     }
     
-    fgets(password, MAX_PASSWORD, stdin);
-    password[strlen(password) - 1] = '\0';
+    get_password(password);
     
     send_to(socket_fd, password, strlen(password));
-    receive(socket_fd, message, MAX_COMMAND_SIZE - 1);
+    receive(socket_fd, command, MAX_COMMAND_SIZE - 1);
 
-    if(strcmp(message, INCORRECT_PASSWORD) == 0)
+    if(strcmp(command, INCORRECT_PASSWORD) == 0)
     {
-        printf("Incorrect password. Connection terminated.\n");
+        printf("Incorrect password. Connection terminated, exiting..\n");
+        close(socket_fd);
+        exit(1);
+    }
+
+    if(strcmp(command, USER_FOUND) == 0)
+    {
+        printf("User already exists, exiting..\n");
+        close(socket_fd);
+        exit(1);
+    }
+
+    if (strcmp(command, USER_ALREADY_ONLINE) == 0)
+    {
+        printf("User already online, exiting..\n");
         close(socket_fd);
         exit(1);
     }
 
     pthread_t thread;
-    int *client_fd = malloc(sizeof(int));
-    *client_fd = socket_fd;
+    void *return_val;
 
-    pthread_create(&thread, NULL, command_handler, client_fd);
-
-    int bytes_received;
-    while(1)
+    if (pthread_create(&thread, NULL, command_handler, &socket_fd) != 0)
     {
-        message = malloc(MAXBUFFERSIZE);
+        perror("Thread create error.");
+        exit(1);
+    }
+
+    int bytes_received = 0;
+    while(stay_alive)
+    {
+        char *message = malloc(MAXBUFFERSIZE);
         bytes_received = recv(socket_fd, message, MAXBUFFERSIZE - 2, 0);
-        if (bytes_received > -1)
+        if (bytes_received > 0)
         {
             if(message[bytes_received - 1] == 'D')
             {
                 message[bytes_received - 1] = '\0';
-                printf("\n--INCOMING MESSAGE--\n%s\n", message);                
+                printf("\n--INCOMING MESSAGE--\n%s\n\nContinue input:\n", message);
+                free(message);
             }
-            else
+            else //if(message[bytes_received - 1] == 'C')
             {
                 message[bytes_received] = '\0';
                 fifoadd(message);
             }
+            // else
+            // {
+            //     //message[bytes_received] = '\0';
+            //     printf("Shouldn't be here..\n");
+            //     free(message);
+            // }
+        }
+        else
+        {
+            printf("Connection ended.\n");
+            stay_alive = 0;
         }
     }
 
-    close(socket_fd);
+    if (pthread_join(thread, &return_val) != 0)
+    {
+        perror("Thread join error.");
+        exit(3);
+    }
+
+    // for(int i = 0; i < MAX_COMMANDS_BUFFER; i++)
+    // {
+    //     if (circular_command_fifo[i] != NULL)
+    //     {
+    //         free(circular_command_fifo[i]);
+    //     }
+    // }
 
     return 0;
 }

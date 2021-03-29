@@ -21,51 +21,68 @@
 
 #define MAXBUFFERSIZE 2050
 #define BACKLOG 20
-#define MAX_ONLINE_USERS 10
-#define SET_SIZE 100
+#define MAX_ONLINE_USERS 20
+#define TABLE_SIZE 100
 #define MAX_USERNAME 51
 #define MAX_PASSWORD 101
 #define USERFILE "users"
-#define MAX_ACTIVE_USERS 20
+#define MAX_ACTIVE_USERS 20 // No more than 40, or active username list will be too large to send.
 #define SERVER_FULL "SFC"
 #define USER_FOUND "UFC"
 #define USER_NOT_FOUND "UNFC"
+#define USER_ALREADY_ONLINE "UAOC"
+#define USER_OFFLINE "UOC"
 #define INCORRECT_PASSWORD "IPWC"
 #define PUBLIC_MESSAGE "PMC"
 #define DIRECT_MESSAGE "DMC"
 #define EXIT "EXC"
 #define READY_TO_RECEIVE "RTRC"
 #define MESSAGE_SENT "MSC"
-#define MAX_COMMAND_SIZE 11
+#define NO_ACTIVE_USERS "NAUC"
+#define MAX_COMMAND_SIZE 5
+#define MAX_COMMANDS_BUFFER 50
 
+struct sockaddr socket_helper(int *socket_fd, int family, int socket_type,
+                                   int flag, char address[], char port[]);
 
+void receive(int socket_fd, char message[], int message_len);
+
+void send_to(int socket_fd, char message[], int message_len);
+
+//Mutex just for the hash table
+static pthread_mutex_t hash_table_lock = PTHREAD_MUTEX_INITIALIZER;
+
+//Read-write lock for active users array, allowing multiple readers but only one writer
+static pthread_rwlock_t activeusers_lock = PTHREAD_RWLOCK_INITIALIZER;
+
+//Return value for a terminated thread
+int thread_exit_return_val;
+
+//Users will be saved to file in this format
 typedef struct userinfo
 {
     char username[MAX_USERNAME];
     char password[MAX_PASSWORD];
 } userinfo;
 
+//Users will be stored in hash table in this format
 typedef struct userlinkedlist
 {
     char username[MAX_USERNAME];
     char password[MAX_PASSWORD];
+    int user_fd; // file descriptor for active users
+    int active_index;
     struct userlinkedlist *next;
 } userlinkedlist;
 
-typedef struct activeuser
-{
-    char username[MAX_USERNAME];
-    int user_fd;
-} activeuser;
-
 FILE *saved_users;
-userlinkedlist * users[SET_SIZE]; // hash set of users
-activeuser * active_users[MAX_ACTIVE_USERS];
+userlinkedlist *users_hash_table[TABLE_SIZE]; // hash set of users
+userlinkedlist *active_users[MAX_ACTIVE_USERS]; // array of active users
 int active_user_count = 0;
 
 unsigned int hash(char *username)
 {
-    int length = strnlen(username, 50);
+    int length = strnlen(username, MAX_USERNAME);
 
     unsigned int hash = 0;
 
@@ -77,93 +94,56 @@ unsigned int hash(char *username)
     return hash;
 }
 
-void init_hash_set(userlinkedlist **users)
+void init_tables()
 {
-    for (int i = 0; i < 100; i++)
+    for (int i = 0; i < TABLE_SIZE; i++)
     {
-        users[i] = NULL;
+        users_hash_table[i] = NULL;
+    }
+
+    for (int j = 0; j < MAX_ACTIVE_USERS; j++)
+    {
+        active_users[j] = NULL;
     }
 }
 
-int add(userlinkedlist **users, userlinkedlist *userll)
+void add(userlinkedlist *userll)
 {
+    pthread_mutex_lock(&hash_table_lock);
     if (userll == NULL)
     {
-        printf("User is NULL\n");
-        return 0;
+        printf("User pointer is NULL\n");
+        return;
     }
 
     int index = hash(userll->username);
 
-    userll->next = users[index];
-    users[index] = userll;
-    return 1;
+    userll->next = users_hash_table[index];
+    users_hash_table[index] = userll;
+    pthread_mutex_unlock(&hash_table_lock);
+    return;
 }
 
-userlinkedlist * contains(userlinkedlist **users, char *username)
+userlinkedlist *contains(char *username)
 {
+    pthread_mutex_lock(&hash_table_lock);
     if (username == NULL)
     {
-        printf("Username is NULL");
+        printf("Username pointer is NULL");
         return NULL;
     }
 
     int index = hash(username);
 
-    userlinkedlist *current_node = users[index];
+    userlinkedlist *current_node = users_hash_table[index];
 
-    while (current_node != NULL && strncmp(username, current_node->username, MAX_USERNAME) != 0)
+    while (current_node != NULL && strcmp(username, current_node->username) != 0)
     {
         current_node = current_node->next;
     }
-
+    pthread_mutex_unlock(&hash_table_lock);
     return current_node;
 }
-
-int delete(userlinkedlist **users, userlinkedlist *userll)
-{
-    if (userll == NULL)
-    {
-        printf("User is NULL\n");
-        return -1;
-    }
-
-    int index = hash(userll->username);
-
-    if(users[index] == NULL)
-    {
-        printf("User doesn't exist.\n");
-        return 0;
-    }
-
-    userlinkedlist * current_node = users[index];
-    userlinkedlist * previous_node = NULL;
-
-    while (current_node != NULL && strncmp(current_node->username, userll->username, 50) != 0)
-    {
-        previous_node = current_node;
-        current_node = current_node->next;        
-    }
-
-    if (previous_node == NULL)
-    {
-        users[index] = NULL;
-    }
-    else
-    {
-        previous_node->next = current_node->next;
-    }
-    return 1;
-}
-
-struct sockaddr socket_helper(int *socket_fd, int family, int socket_type,
-                                   int flag, char address[], char port[]);
-
-void receive(int socket_fd, char message[], int message_len);
-
-void send_to(int socket_fd, char message[], int message_len);
-
-void sigchld_handler(int s);
 
 struct sockaddr socket_helper(int *socket_fd, int family, int socket_type,
                                    int flag, char address[], char port[])
@@ -253,7 +233,12 @@ void receive(int socket_fd, char message[], int message_len)
     if ((bytes_received = recv(socket_fd, message, message_len, 0)) == -1)
     {
         perror("Unable to receive");
-        exit(1);
+        pthread_exit(&thread_exit_return_val);
+    }
+
+    if(bytes_received < 1)
+    {
+        pthread_exit(&thread_exit_return_val);
     }
 
     message[bytes_received] = '\0';
@@ -278,159 +263,229 @@ void send_to(int socket_fd, char message[], int message_len)
     if ((bytes_sent = send(socket_fd, message, message_len, 0)) == -1)
     {
         perror("Unable to send");
-        exit(1);
+        pthread_exit(&thread_exit_return_val);
     }
 }
 
-void conn_handler(int client_fd)
+void add_active_user(userlinkedlist *user)
+{
+    pthread_rwlock_wrlock(&activeusers_lock);
+    for(int i = 0; i < MAX_ACTIVE_USERS; i++)
+    {
+        if (active_users[i] == NULL)
+        {
+            user->active_index = i;
+            active_users[i] = user;
+            active_user_count++;
+            break;
+        }
+    }
+    pthread_rwlock_unlock(&activeusers_lock);
+}
+
+void remove_active_user(userlinkedlist *user)
+{
+    pthread_rwlock_wrlock(&activeusers_lock);
+    active_users[user->active_index] = NULL;
+    user->active_index = -1;
+    user->user_fd = -1;
+    active_user_count--;
+    pthread_rwlock_unlock(&activeusers_lock);
+}
+
+void send_to_all(char *message, userlinkedlist *sending_user)
+{
+    pthread_rwlock_rdlock(&activeusers_lock);
+    for(int i = 0; i < MAX_ACTIVE_USERS; i++)
+    {
+        if (active_users[i] != NULL && sending_user->active_index != i)
+        {
+            send_to(active_users[i]->user_fd, message, strlen(message));
+        }
+    }
+    pthread_rwlock_unlock(&activeusers_lock);
+}
+
+char *get_all_active_users(int client_fd)
+{
+    char *active_usernames = malloc((MAX_ACTIVE_USERS - 1) * (MAX_USERNAME));
+    active_usernames[0] = '\0';
+
+    pthread_rwlock_rdlock(&activeusers_lock);
+    for(int i = 0; i < MAX_ACTIVE_USERS; i++)
+    {
+        if (active_users[i] && active_users[i]->user_fd != client_fd)
+        {
+            strcat(active_usernames, active_users[i]->username);
+            strcat(active_usernames, "\n");
+        }
+    }
+    pthread_rwlock_unlock(&activeusers_lock);
+    strcat(active_usernames, "C");
+    return active_usernames;
+}
+
+userlinkedlist *user_setup(int client_fd)
 {
     char username[MAX_USERNAME];
-    char message[MAXBUFFERSIZE];
-
-    if (active_user_count >= MAX_ACTIVE_USERS)
-    {
-        strcpy(message, SERVER_FULL);
-        send_to(client_fd, message, strlen(message));
-        close(client_fd);
-        return;
-    }
-    
     send_to(client_fd, READY_TO_RECEIVE, strlen(READY_TO_RECEIVE));
     receive(client_fd, username, MAX_USERNAME - 1);
 
-    userlinkedlist *userclient = contains(users, username);
+    userlinkedlist *userclient = contains(username);
     userinfo usersave;
-    activeuser *active_user = malloc(sizeof(activeuser));
-    int index;
+    char password[MAX_PASSWORD];
 
     if (userclient == NULL)
     {
+        userclient = malloc(sizeof(userlinkedlist));
         send_to(client_fd, USER_NOT_FOUND, strlen(USER_NOT_FOUND));
-        receive(client_fd, message, MAX_PASSWORD - 1);
+        receive(client_fd, password, MAX_PASSWORD - 1);
 
-        strncpy(userclient->username, username, MAX_USERNAME);
-        strncpy(userclient->password, message, MAX_PASSWORD);
-        strncpy(usersave.username, username, MAX_USERNAME);
-        strncpy(usersave.password, message, MAX_PASSWORD);
-        userclient->next = NULL;
-        strncpy(active_user, username, MAX_USERNAME);
-        active_user->user_fd = client_fd;
-
-        add(users, userclient);
-        for (index = 0; index < MAX_ACTIVE_USERS; index++)
+        if(contains(username) != NULL)
         {
-            if (active_users[index] == NULL)
-            {
-                active_users[index] = active_user;
-                active_user_count++;
-            }
+            free(userclient);
+            send_to(client_fd, USER_FOUND, strlen(USER_FOUND));
+            close(client_fd);
+            pthread_exit(&thread_exit_return_val);
         }
+        //Prepare userlinkedlist structure to insert into hash table
+        strncpy(userclient->username, username, MAX_USERNAME);
+        strncpy(userclient->password, password, MAX_PASSWORD);
+        userclient->user_fd = client_fd;
+        userclient->next = NULL;
+
+        //Prepare usersave structure to save to file
+        strncpy(usersave.username, username, MAX_USERNAME);
+        strncpy(usersave.password, password, MAX_PASSWORD);
+
+        add(userclient);
+        add_active_user(userclient);
         fwrite(&usersave, sizeof(userinfo), 1, saved_users);
         fflush(saved_users);
+
+        printf("%s logged in\n", username);
+        send_to(client_fd, READY_TO_RECEIVE, strlen(READY_TO_RECEIVE));
+        return userclient;        
     }
-    else
+
+    send_to(client_fd, USER_FOUND, strlen(USER_FOUND));
+    receive(client_fd, password, MAX_PASSWORD - 1);    
+
+    if (strcmp(userclient->password, password) != 0)
     {
-        send_to(client_fd, USER_FOUND, strlen(USER_FOUND));
-        receive(client_fd, message, MAX_PASSWORD - 1);
-
-        if (strcmp(userclient->password, message) != 0)
-        {
-            send_to(client_fd, INCORRECT_PASSWORD, strlen(INCORRECT_PASSWORD));
-            close(client_fd);
-            return;
-        }
-
-        strncpy(active_user, username, MAX_USERNAME);
-        active_user->user_fd = client_fd;
-
-        for (index = 0; index < MAX_ACTIVE_USERS; index++)
-        {
-            if (active_users[index] == NULL)
-            {
-                active_users[index] = active_user;
-                active_user_count++;
-            }
-        }
+        send_to(client_fd, INCORRECT_PASSWORD, strlen(INCORRECT_PASSWORD));
+        close(client_fd);
+        pthread_exit(&thread_exit_return_val);
     }
 
-    printf("User %s logged in\n", username);
+    if(userclient->user_fd != -1)
+    {
+        send_to(client_fd, USER_ALREADY_ONLINE, strlen(USER_ALREADY_ONLINE));
+        close(client_fd);
+        pthread_exit(&thread_exit_return_val);
+    }
 
-    send_to(client_fd, READY_TO_RECEIVE, strlen(READY_TO_RECEIVE));   
+    userclient->user_fd = client_fd;
+    add_active_user(userclient);
+
+    printf("%s logged in\n", username);
+    
+    send_to(client_fd, READY_TO_RECEIVE, strlen(READY_TO_RECEIVE));
+    return userclient;
+}
+
+void public_message(int client_fd, userlinkedlist *sending_user)
+{
+    pthread_rwlock_rdlock(&activeusers_lock);
+    if(active_user_count < 2)
+    {
+        send_to(client_fd, NO_ACTIVE_USERS, strlen(NO_ACTIVE_USERS));
+        pthread_rwlock_unlock(&activeusers_lock);
+        return;
+    }
+    pthread_rwlock_unlock(&activeusers_lock);
+    char message[MAXBUFFERSIZE];
+    send_to(client_fd, READY_TO_RECEIVE, strlen(READY_TO_RECEIVE));
+    receive(client_fd, message, MAXBUFFERSIZE - 2);
+    send_to_all(message, sending_user);
+    send_to(client_fd, MESSAGE_SENT, strlen(MESSAGE_SENT));    
+}
+
+void direct_message(int client_fd)
+{
+    char *active_usernames = get_all_active_users(client_fd);
+    if (strlen(active_usernames) < 2)
+    {
+        send_to(client_fd, NO_ACTIVE_USERS, strlen(NO_ACTIVE_USERS));
+        return;
+    }
+    char target_username[MAX_USERNAME];
+    char message[MAXBUFFERSIZE];
+
+    send_to(client_fd, active_usernames, strlen(active_usernames));
+    free(active_usernames);
+    receive(client_fd, target_username, MAX_USERNAME - 1);
+
+    userlinkedlist *target_user = contains(target_username);
+
+    if(target_user == NULL || target_user->user_fd == client_fd)
+    {
+        send_to(client_fd, USER_NOT_FOUND, strlen(USER_NOT_FOUND));
+        return;
+    }
+
+    if(target_user->user_fd == -1)
+    {
+        send_to(client_fd, USER_OFFLINE, strlen(USER_OFFLINE));
+        return;
+    }
+
+    send_to(client_fd, READY_TO_RECEIVE, strlen(READY_TO_RECEIVE));
+    receive(client_fd, message, MAXBUFFERSIZE - 2);
+    if(target_user->user_fd != -1)
+    {
+        send_to(target_user->user_fd, message, strlen(message));
+        send_to(client_fd, MESSAGE_SENT, strlen(MESSAGE_SENT));
+        return;
+    }
+    send_to(client_fd, USER_OFFLINE, strlen(USER_OFFLINE));
+}
+
+void *conn_handler(void *p_client_fd)
+{
+    int socket_fd = * (int *) p_client_fd;
+    free(p_client_fd);
+    char command[MAX_COMMAND_SIZE];
+
+    pthread_rwlock_rdlock(&activeusers_lock);
+    if (active_user_count >= MAX_ACTIVE_USERS)
+    {
+        pthread_rwlock_unlock(&activeusers_lock);
+        send_to(socket_fd, SERVER_FULL, strlen(SERVER_FULL));
+        close(socket_fd);
+        pthread_exit(&thread_exit_return_val);
+    }
+    pthread_rwlock_unlock(&activeusers_lock);
+
+    userlinkedlist *user = user_setup(socket_fd);
 
     while (1)
     {
-        receive(client_fd, message, MAX_COMMAND_SIZE - 1);
-        if (strcmp(PUBLIC_MESSAGE, message) == 0)
+        receive(socket_fd, command, MAX_COMMAND_SIZE - 1);
+        if (strcmp(PUBLIC_MESSAGE, command) == 0)
         {
-            send_to(client_fd, READY_TO_RECEIVE, strlen(READY_TO_RECEIVE));
-            receive(client_fd, message, MAXBUFFERSIZE - 2);
-            for(index = 0; index < MAX_ACTIVE_USERS; index++)
-            {
-                if (active_users[index] != NULL)
-                {
-                    send_to(active_users[index]->user_fd, message, strlen(message));
-                }
-            }
-            send_to(client_fd, MESSAGE_SENT, strlen(MESSAGE_SENT));
+            public_message(socket_fd, user);
         }
-        else if (strcmp(DIRECT_MESSAGE, message) == 0)
+        else if (strcmp(DIRECT_MESSAGE, command) == 0)
         {
-            char *active_usernames = malloc((MAX_ACTIVE_USERS - 1) * (MAX_USERNAME + 1));
-            active_usernames[0] = '\0';
-            for(index = 0; index < MAX_ACTIVE_USERS; index++)
-            {
-                if (active_users[index] != NULL && active_users[index]->user_fd != client_fd)
-                {
-                    strcat(active_usernames, active_users[index]->username);
-                    strcat(active_usernames, "\n");
-                }
-            }
-            send_to(client_fd, active_usernames, strlen(active_usernames));
-            free(active_usernames);
-            receive(client_fd, message, MAX_USERNAME - 1);
-
-            int sent = 0;                
-            for(index = 0; index < MAX_ACTIVE_USERS; index++)
-            {
-                if (active_users[index] != NULL && strcmp(message, active_users[index]->username) == 0)
-                {
-                    send_to(client_fd, READY_TO_RECEIVE, strlen(READY_TO_RECEIVE));
-                    receive(client_fd, message, MAXBUFFERSIZE - 2);
-                    int bytes_sent = send(active_users[index]->user_fd, message, strlen(message), 0);
-                    if (bytes_sent != -1)
-                    {
-                        sent = 1;
-                    }
-                    break;
-                }
-            }
-            if (sent)
-            {
-                send_to(client_fd, MESSAGE_SENT, strlen(MESSAGE_SENT));
-            }
-            else
-            {
-                send_to(client_fd, USER_NOT_FOUND, strlen(USER_NOT_FOUND));
-            }
-        }
-        else if (strcmp(EXIT, message) == 0)
-        {
-            for(index = 0; index < MAX_ACTIVE_USERS; index++)
-            {
-                if (active_users[index] != NULL && active_users[index]->user_fd == client_fd)
-                {
-                    active_users[index] = NULL;
-                    active_user_count--;
-                    break;
-                }
-            }
-            close(client_fd);
-            return;
+            direct_message(socket_fd);
         }
         else
         {
-            printf("Not a command\n");
-            exit(1);
+            remove_active_user(user);
+            close(socket_fd);
+            printf("%s logged out\n", user->username);
+            pthread_exit(&thread_exit_return_val);
         }
     }
 }
@@ -442,14 +497,13 @@ int main (int argc, char *argv[]) {
         exit(1);
     }
 
-    int server_fd, client_fd;
+    int server_fd;
     struct sockaddr_storage client_address;
     socklen_t addr_len = sizeof client_address;
-    pthread_t thread;
-    init_hash_set(users);
+    init_tables();
 
     socket_helper(&server_fd, AF_INET, SOCK_STREAM, AI_PASSIVE, NULL, argv[1]);
-    printf("socket created and bound.\n");
+    printf("Socket created and bound.\n");
 
     printf("Reading existing users from file.\n");
 
@@ -466,11 +520,13 @@ int main (int argc, char *argv[]) {
     while(fread(&user, sizeof(userinfo), 1, saved_users))
     {
         userlinkedlist *userll = malloc(sizeof(userlinkedlist));
-        strncpy(userll->username, &user.username, MAX_USERNAME);
-        strncpy(userll->password, &user.password, MAX_PASSWORD);
+        strncpy(userll->username, user.username, MAX_USERNAME);
+        strncpy(userll->password, user.password, MAX_PASSWORD);
+        userll->user_fd = -1;
+        userll->active_index = -1;
         userll->next = NULL;
 
-        add(users, userll);
+        add(userll);
     }
 
     printf("Done reading existing users.\n");
@@ -481,19 +537,22 @@ int main (int argc, char *argv[]) {
         exit(1);
     }
 
-    printf("listening\n");
+    printf("Listening...\n");
     
     while (1)
     {
-        client_fd = accept(server_fd, (struct sockaddr*)&client_address, &addr_len);
+        int *client_fd = malloc(sizeof(int));
+        *client_fd = accept(server_fd, (struct sockaddr*)&client_address, &addr_len);
 
-        if(client_fd == -1) {
+        if(*client_fd == -1) {
             perror("Couldn't accept connection.");
             continue;
         }
 
-        printf("Connection accepted\n");
-        conn_handler(client_fd);
+        printf("New connection accepted.\n");
+
+        pthread_t thread;
+        pthread_create(&thread, NULL, conn_handler, client_fd);
     }
     return 0;
 }
