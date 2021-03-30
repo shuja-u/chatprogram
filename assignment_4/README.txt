@@ -1,15 +1,9 @@
 The directory contains the following files:
-server - directory
-client - directory
-Makefile
-
-The server directory contains:
 chatServer.c
+chatClient.c
 helper.c
 helper.h
-
-The client directory contains:
-chatClient.c
+Makefile
 
 Instructions:
 1. Ensure "gcc" is installed.
@@ -23,10 +17,8 @@ To run the server:
 
 To use the client:
 1. Open the terminal in the same directory as the Makefile
-2. Enter the command in the following format: ./chatClient <server_host> <server_port>
-   Example: ./chatClient localhost 6500
-
-3. Username can be entered after the client starts.
+2. Enter the command in the following format: ./chatClient <server_host> <server_port> <username>
+   Example: ./chatClient localhost 6500 user1
 
 Installation commands (for most Debian/Ubuntu based distros):
 sudo apt install gcc

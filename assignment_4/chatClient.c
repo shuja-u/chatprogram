@@ -365,12 +365,14 @@ void *command_handler(void *p_client_fd)
 
 int main(int argc, char *argv[])
 {
-    if (argc != 3)
+    if (argc != 4)
     {
-        printf("Arguments: IP Port\n");
+        printf("Arguments: IP Port Username\n");
         exit(1);
     }
 
+    strncpy(this_user, argv[3], MAX_USERNAME);
+    this_user[strlen(argv[3])] = '\0';
     char password[MAX_PASSWORD];
     char command[MAX_COMMAND_SIZE];
     int socket_fd;
@@ -387,10 +389,6 @@ int main(int argc, char *argv[])
     }
 
     // Handle user creation
-
-    printf("Connected.\nEnter username:\n");
-
-    get_username(this_user);
 
     send_to(socket_fd, this_user, strlen(this_user));
     receive(socket_fd, command, MAX_COMMAND_SIZE - 1);
