@@ -22,7 +22,7 @@
 #define TABLE_SIZE 100
 #define MAX_USERNAME 51
 #define MAX_PASSWORD 101
-#define USERFILE "users"
+#define USERFILE "saved_users"
 #define MAX_ACTIVE_USERS 20 // No more than 40, or active username list will be too large to send.
 #define SERVER_FULL "SFC"
 #define USER_FOUND "UFC"

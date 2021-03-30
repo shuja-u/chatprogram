@@ -17,14 +17,16 @@ Instructions:
 3. Open the terminal in the same directory as the Makefile and type "make".
 
 To run the server:
-1. Enter the command in the following format: ./chatServer <port>
+1. Open the terminal in the same directory as the Makefile
+2. Enter the command in the following format: ./chatServer <port>
    Example: ./chatServer 6500
 
 To use the client:
-1. Enter the command in the following format: ./chatClient <server_host> <server_port>
+1. Open the terminal in the same directory as the Makefile
+2. Enter the command in the following format: ./chatClient <server_host> <server_port>
    Example: ./chatClient localhost 6500
 
-2. Username can be entered after the client starts.
+3. Username can be entered after the client starts.
 
 Installation commands (for most Debian/Ubuntu based distros):
 sudo apt install gcc
