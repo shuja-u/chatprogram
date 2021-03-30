@@ -2,70 +2,28 @@
  * Shuja Uddin
  * sm2849sr
  * 
- * This file includes the headers and definitions required for the server and 
- * the client.
- * 
- * It also includes function definitions for some helper functions located in 
- * server_client_helper.
+ * This file contains the logic for the server.
  */
 
-#include <sys/socket.h>
-#include <stdio.h>
-#include <sys/types.h>
-#include <netdb.h>
-#include <string.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <errno.h>
-#include <pthread.h>
+#include "helper.h"
 
-#define MAXBUFFERSIZE 2050
-#define BACKLOG 20
-#define MAX_ONLINE_USERS 20
-#define TABLE_SIZE 100
-#define MAX_USERNAME 51
-#define MAX_PASSWORD 101
-#define USERFILE "users"
-#define MAX_ACTIVE_USERS 20 // No more than 40, or active username list will be too large to send.
-#define SERVER_FULL "SFC"
-#define USER_FOUND "UFC"
-#define USER_NOT_FOUND "UNFC"
-#define USER_ALREADY_ONLINE "UAOC"
-#define USER_OFFLINE "UOC"
-#define INCORRECT_PASSWORD "IPWC"
-#define PUBLIC_MESSAGE "PMC"
-#define DIRECT_MESSAGE "DMC"
-#define EXIT "EXC"
-#define READY_TO_RECEIVE "RTRC"
-#define MESSAGE_SENT "MSC"
-#define NO_ACTIVE_USERS "NAUC"
-#define MAX_COMMAND_SIZE 5
-#define MAX_COMMANDS_BUFFER 50
-
-struct sockaddr socket_helper(int *socket_fd, int family, int socket_type,
-                                   int flag, char address[], char port[]);
-
-void receive(int socket_fd, char message[], int message_len);
-
-void send_to(int socket_fd, char message[], int message_len);
-
-//Mutex just for the hash table
+// Mutex for the hash table
 static pthread_mutex_t hash_table_lock = PTHREAD_MUTEX_INITIALIZER;
 
 //Read-write lock for active users array, allowing multiple readers but only one writer
 static pthread_rwlock_t activeusers_lock = PTHREAD_RWLOCK_INITIALIZER;
 
-//Return value for a terminated thread
+// Return value for a terminated thread
 int thread_exit_return_val;
 
-//Users will be saved to file in this format
+// Users will be saved to file in this format
 typedef struct userinfo
 {
     char username[MAX_USERNAME];
     char password[MAX_PASSWORD];
 } userinfo;
 
-//Users will be stored in hash table in this format
+// Users will be stored in the hash table in this format
 typedef struct userlinkedlist
 {
     char username[MAX_USERNAME];
@@ -80,6 +38,15 @@ userlinkedlist *users_hash_table[TABLE_SIZE]; // hash set of users
 userlinkedlist *active_users[MAX_ACTIVE_USERS]; // array of active users
 int active_user_count = 0;
 
+/*
+ * Function: hash
+ * ----------------
+ * Used to calculate the index of a user before inserting into the hash table.
+ * 
+ * *username: hash will be calculated based on username
+ * 
+ * returns: the hashed index 
+ */
 unsigned int hash(char *username)
 {
     int length = strnlen(username, MAX_USERNAME);
@@ -89,11 +56,16 @@ unsigned int hash(char *username)
     for (int i = 0; i < length; i++)
     {
         hash += username[i];
-        hash = (hash * username[i]) % 100;
+        hash = (hash * username[i]) % TABLE_SIZE;
     }
     return hash;
 }
 
+/*
+ * Function: init_tables
+ * -----------------------
+ * Initializes both the hash table and active user array by making sure they're empty.
+ */
 void init_tables()
 {
     for (int i = 0; i < TABLE_SIZE; i++)
@@ -107,6 +79,13 @@ void init_tables()
     }
 }
 
+/*
+ * Function: add
+ * ---------------
+ * Adds a user to the hash table in a thread safe fashion.
+ * 
+ * *userll: the user to be added
+ */
 void add(userlinkedlist *userll)
 {
     pthread_mutex_lock(&hash_table_lock);
@@ -124,6 +103,16 @@ void add(userlinkedlist *userll)
     return;
 }
 
+/*
+ * Function: contains
+ * ---------------------
+ * Checks if a user with a given username exists in the hash table in a thread safe fashion.
+ * Returns a pointer to the user, if found.
+ * 
+ * *username: the username to be matched
+ * 
+ * returns: a pointer to the user, if found. NULL otherwise.
+ */
 userlinkedlist *contains(char *username)
 {
     pthread_mutex_lock(&hash_table_lock);
@@ -145,88 +134,17 @@ userlinkedlist *contains(char *username)
     return current_node;
 }
 
-struct sockaddr socket_helper(int *socket_fd, int family, int socket_type,
-                                   int flag, char address[], char port[])
-{
-    struct addrinfo init_info, *addrinfo_list, *next;
-    int return_val;
-    struct sockaddr result;
-    int yes = 1;
-
-    memset(&init_info, 0, sizeof init_info);
-    init_info.ai_family = family;
-    init_info.ai_socktype = socket_type;
-    if (flag)
-    {
-        init_info.ai_flags = flag;
-    }
-
-    return_val = getaddrinfo(address, port, &init_info, &addrinfo_list);
-
-    if (return_val != 0)
-    {
-        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(return_val));
-        exit(1);
-    }
-
-    for (next = addrinfo_list; next != NULL; next = next->ai_next)
-    {
-        *socket_fd = socket(next->ai_family, next->ai_socktype,
-                            next->ai_protocol);
-
-        if (*socket_fd == -1)
-        {
-            perror("Couldn't create socket");
-            continue;
-        }
-
-        if (flag && setsockopt(*socket_fd, SOL_SOCKET, (SO_REUSEPORT | SO_REUSEADDR), &yes, sizeof(yes)) == -1)
-        {
-            perror("Address is in use");
-            exit(1);
-        }
-
-        if (flag && bind(*socket_fd, next->ai_addr, next->ai_addrlen) == -1)
-        {
-            close(*socket_fd);
-            perror("Couldn't bind");
-            continue;
-        }
-
-        if (!flag && connect(*socket_fd, next->ai_addr, next->ai_addrlen) == -1)
-        {
-            close(*socket_fd);
-            perror("Couldn't connect");
-            continue;
-        }
-        break;
-    }
-
-    if (next == NULL)
-    {
-        fprintf(stderr, "Socket failed.\n");
-        exit(1);
-    }
-
-    result = *next->ai_addr;
-    freeaddrinfo(addrinfo_list);
-    return result;
-}
-
 /*
- * Function: receive_from
- * ----------------------
- * Uses the recvfrom function and marks the end of the received message. 
+ * Function: receive
+ * -------------------
+ * Uses the recv function and marks the end of the received message. 
  * Additionally, if the process was unsuccessful, it will print the 
- * appropriate message and exit the program.
+ * appropriate message and exit the thread.
  * 
  * socket_fd: socket file descriptor.
  * message[]: where the received message will be stored.
  * message_len: how much message[] can hold.
- * *address: this is where the source address will be stored.
- * *addr_len: size of the source address will be stored here.
  */
-
 void receive(int socket_fd, char message[], int message_len)
 {
     int bytes_received;
@@ -246,17 +164,14 @@ void receive(int socket_fd, char message[], int message_len)
 
 /*
  * Function: send_to
- * -----------------
- * Uses the sendto function and prints an appropriate message if sending was 
+ * --------------------
+ * Uses the send function and prints an appropriate message if sending was 
  * unsuccessful.
  * 
  * socket_fd: socket file descriptor.
  * message[]: the message to send.
  * message_len: length of message[].
- * *address: destination address.
- * addr_len: size of destination address.
  */
-
 void send_to(int socket_fd, char message[], int message_len)
 {
     int bytes_sent;
@@ -267,6 +182,13 @@ void send_to(int socket_fd, char message[], int message_len)
     }
 }
 
+/*
+ * Function: add_active_user
+ * -------------------------------
+ * Adds a given user to the active user array. Uses a read-write lock for thread safety.
+ * 
+ * *user: the user to be added.
+ */
 void add_active_user(userlinkedlist *user)
 {
     pthread_rwlock_wrlock(&activeusers_lock);
@@ -283,6 +205,13 @@ void add_active_user(userlinkedlist *user)
     pthread_rwlock_unlock(&activeusers_lock);
 }
 
+/*
+ * Function: remove_active_user
+ * ----------------------------------
+ * Removes a given user from the active user array. Uses a read-write lock for thread safety.
+ * 
+ * *user: the user to be removed. 
+ */
 void remove_active_user(userlinkedlist *user)
 {
     pthread_rwlock_wrlock(&activeusers_lock);
@@ -293,12 +222,20 @@ void remove_active_user(userlinkedlist *user)
     pthread_rwlock_unlock(&activeusers_lock);
 }
 
-void send_to_all(char *message, userlinkedlist *sending_user)
+/*
+ * Function: send_to_all
+ * -------------------------
+ * Sends the given message to all users except the sending user.
+ * 
+ * *message: the message to send.
+ * sending_user: the user not to send the message to. 
+ */
+void send_to_all(char *message, int sending_user)
 {
     pthread_rwlock_rdlock(&activeusers_lock);
     for(int i = 0; i < MAX_ACTIVE_USERS; i++)
     {
-        if (active_users[i] != NULL && sending_user->active_index != i)
+        if (active_users[i] != NULL && sending_user != active_users[i]->user_fd)
         {
             send_to(active_users[i]->user_fd, message, strlen(message));
         }
@@ -306,6 +243,17 @@ void send_to_all(char *message, userlinkedlist *sending_user)
     pthread_rwlock_unlock(&activeusers_lock);
 }
 
+/*
+ * Function: get_all_active_users
+ * ----------------------------------
+ * Builds a string of all active users except the one requesting the list.
+ * Every user is on a new line. Marks the list as a command message.
+ * Uses a read-write to allow multiple threads simultaneous access.
+ * 
+ * client_fd: socket descriptor of the user requesting the list.
+ * 
+ * returns: a pointer to a string containing all active users 
+ */
 char *get_all_active_users(int client_fd)
 {
     char *active_usernames = malloc((MAX_ACTIVE_USERS - 1) * (MAX_USERNAME));
@@ -325,6 +273,15 @@ char *get_all_active_users(int client_fd)
     return active_usernames;
 }
 
+/*
+ * Function: user_setup
+ * ------------------------
+ * Handles the initial user setup and returns the created user. Exits the thread if user couldn't be created.
+ * 
+ * client_fd: socket descriptor that will be associated the created user.
+ * 
+ * returns: a pointer to a user.
+ */
 userlinkedlist *user_setup(int client_fd)
 {
     char username[MAX_USERNAME];
@@ -394,7 +351,14 @@ userlinkedlist *user_setup(int client_fd)
     return userclient;
 }
 
-void public_message(int client_fd, userlinkedlist *sending_user)
+/*
+ * Function: public_message
+ * -----------------------------
+ * Handles the PM command. Used to receive a message and send it to all users.
+ * 
+ * client_fd: socket of the sending user.
+ */
+void public_message(int client_fd)
 {
     pthread_rwlock_rdlock(&activeusers_lock);
     if(active_user_count < 2)
@@ -407,10 +371,17 @@ void public_message(int client_fd, userlinkedlist *sending_user)
     char message[MAXBUFFERSIZE];
     send_to(client_fd, READY_TO_RECEIVE, strlen(READY_TO_RECEIVE));
     receive(client_fd, message, MAXBUFFERSIZE - 2);
-    send_to_all(message, sending_user);
+    send_to_all(message, client_fd);
     send_to(client_fd, MESSAGE_SENT, strlen(MESSAGE_SENT));    
 }
 
+/*
+ * Function: direct_message
+ * -----------------------------
+ * Handles the DM command. Used to send a message from one user to another.
+ * 
+ * client_fd: socket of the sending user.
+ */
 void direct_message(int client_fd)
 {
     char *active_usernames = get_all_active_users(client_fd);
@@ -451,6 +422,15 @@ void direct_message(int client_fd)
     send_to(client_fd, USER_OFFLINE, strlen(USER_OFFLINE));
 }
 
+/*
+ * Function: command_handler
+ * --------------------------------
+ * Handles every new connection.
+ * 
+ * *p_client_fd: pointer to the socket of the new connection.
+ * 
+ * returns: a void pointer.
+ */
 void *conn_handler(void *p_client_fd)
 {
     int socket_fd = * (int *) p_client_fd;
@@ -474,7 +454,7 @@ void *conn_handler(void *p_client_fd)
         receive(socket_fd, command, MAX_COMMAND_SIZE - 1);
         if (strcmp(PUBLIC_MESSAGE, command) == 0)
         {
-            public_message(socket_fd, user);
+            public_message(socket_fd);
         }
         else if (strcmp(DIRECT_MESSAGE, command) == 0)
         {
@@ -507,6 +487,7 @@ int main (int argc, char *argv[]) {
 
     printf("Reading existing users from file.\n");
 
+    // Creates file if it doesn't exist, name of file (USERFILE) can be changed in helper.h
     saved_users = fopen(USERFILE, "ab+");
 
     if (saved_users == NULL)
@@ -517,6 +498,7 @@ int main (int argc, char *argv[]) {
 
     userinfo user;
 
+    // Stores the users from the file into the hash table.
     while(fread(&user, sizeof(userinfo), 1, saved_users))
     {
         userlinkedlist *userll = malloc(sizeof(userlinkedlist));

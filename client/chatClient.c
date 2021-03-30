@@ -2,57 +2,36 @@
  * Shuja Uddin
  * sm2849sr
  * 
- * This file includes the headers and definitions required for the server and 
- * the client.
- * 
- * It also includes function definitions for some helper functions located in 
- * server_client_helper.
+ * This file contains the logic for the client.
  */
 
-#include <sys/socket.h>
-#include <stdio.h>
-#include <stdio_ext.h>
-#include <sys/types.h>
-#include <netdb.h>
-#include <string.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <errno.h>
-#include <pthread.h>
-
-#define MAXBUFFERSIZE 2050
-#define BACKLOG 20
-#define MAX_ONLINE_USERS 20
-#define TABLE_SIZE 100
-#define MAX_USERNAME 51
-#define MAX_PASSWORD 101
-#define USERFILE "users"
-#define MAX_ACTIVE_USERS 20 // No more than 40, or active username list will be too large to send.
-#define SERVER_FULL "SFC"
-#define USER_FOUND "UFC"
-#define USER_NOT_FOUND "UNFC"
-#define USER_ALREADY_ONLINE "UAOC"
-#define USER_OFFLINE "UOC"
-#define INCORRECT_PASSWORD "IPWC"
-#define PUBLIC_MESSAGE "PMC"
-#define DIRECT_MESSAGE "DMC"
-#define EXIT "EXC"
-#define READY_TO_RECEIVE "RTRC"
-#define MESSAGE_SENT "MSC"
-#define NO_ACTIVE_USERS "NAUC"
-#define MAX_COMMAND_SIZE 5
-#define MAX_COMMANDS_BUFFER 50
+#include "helper.h"
 
 int stay_alive = 1;
 
+// Username of the user
+char this_user[MAX_USERNAME];
+
+// Mutex for the queue
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+
+// Condition variable used to wait for the queue to stop being full/empty
 static pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 
+// Used to store incoming commands
 char *circular_command_fifo[MAX_COMMANDS_BUFFER];
 int head = 0;
 int tail = 0;
 int full = 0;
 
+/*
+ * Function: fifoadd
+ * -------------------
+ * Adds a command message to the queue in a thread safe fashion.
+ * Notifies any sleeping threads once a message has been added.
+ * 
+ * *message: a pointer to a command message.
+ */
 void fifoadd(char *message)
 {
     pthread_mutex_lock(&lock);
@@ -76,6 +55,14 @@ void fifoadd(char *message)
     return;
 }
 
+/*
+ * Function: fifopop
+ * -------------------
+ * Removes a command message from the queue in a thread safe fashion.
+ * Notifies any sleeping threads once a message has been removed.
+ * 
+ * returns: a pointer to the removed message. 
+ */
 char *fifopop()
 {
     pthread_mutex_lock(&lock);
@@ -96,111 +83,16 @@ char *fifopop()
 }
 
 /*
- * Function: create_bind_socket
- * ----------------------------
- * Creates and binds a socket. It can also be used to just create a socket 
- * without binding it.
- * 
- * *socket_fd: the socket file descriptor will be stored here once the 
- *             function creates it.
- * family: socket family (eg. IPv4/IPv6).
- * socket_type: socket type (eg. TCP/UDP).
- * flag: can include extra information for getaddrinfo
- * address[]: socket address.
- * port[]: port number.
- * 
- * returns: a sockaddr struct that contains socket address information. 
- */
-
-struct sockaddr socket_helper(int *socket_fd, int family, int socket_type,
-                                   int flag, char address[], char port[]);
-
-void receive(int socket_fd, char message[], int message_len);
-
-void send_to(int socket_fd, char message[], int message_len);
-
-struct sockaddr socket_helper(int *socket_fd, int family, int socket_type,
-                                   int flag, char address[], char port[])
-{
-    struct addrinfo init_info, *addrinfo_list, *next;
-    int return_val;
-    struct sockaddr result;
-    int yes = 1;
-
-    memset(&init_info, 0, sizeof init_info);
-    init_info.ai_family = family;
-    init_info.ai_socktype = socket_type;
-    if (flag)
-    {
-        init_info.ai_flags = flag;
-    }
-
-    return_val = getaddrinfo(address, port, &init_info, &addrinfo_list);
-
-    if (return_val != 0)
-    {
-        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(return_val));
-        exit(1);
-    }
-
-    for (next = addrinfo_list; next != NULL; next = next->ai_next)
-    {
-        *socket_fd = socket(next->ai_family, next->ai_socktype,
-                            next->ai_protocol);
-
-        if (*socket_fd == -1)
-        {
-            perror("Couldn't create socket");
-            continue;
-        }
-
-        if (flag && setsockopt(*socket_fd, SOL_SOCKET, (SO_REUSEPORT | SO_REUSEADDR), &yes, sizeof(yes)) == -1)
-        {
-            perror("Address is in use");
-            exit(1);
-        }
-
-        if (flag && bind(*socket_fd, next->ai_addr, next->ai_addrlen) == -1)
-        {
-            close(*socket_fd);
-            perror("Couldn't bind");
-            continue;
-        }
-
-        if (!flag && connect(*socket_fd, next->ai_addr, next->ai_addrlen) == -1)
-        {
-            close(*socket_fd);
-            perror("Couldn't connect");
-            continue;
-        }
-        break;
-    }
-
-    if (next == NULL)
-    {
-        fprintf(stderr, "Socket failed.\n");
-        exit(1);
-    }
-
-    result = *next->ai_addr;
-    freeaddrinfo(addrinfo_list);
-    return result;
-}
-
-/*
- * Function: receive_from
- * ----------------------
- * Uses the recvfrom function and marks the end of the received message. 
+ * Function: receive
+ * -------------------
+ * Uses the recv function and marks the end of the received message. 
  * Additionally, if the process was unsuccessful, it will print the 
  * appropriate message and exit the program.
  * 
  * socket_fd: socket file descriptor.
  * message[]: where the received message will be stored.
  * message_len: how much message[] can hold.
- * *address: this is where the source address will be stored.
- * *addr_len: size of the source address will be stored here.
  */
-
 void receive(int socket_fd, char message[], int message_len)
 {
     int bytes_received;
@@ -220,17 +112,14 @@ void receive(int socket_fd, char message[], int message_len)
 
 /*
  * Function: send_to
- * -----------------
- * Uses the sendto function and prints an appropriate message if sending was 
+ * --------------------
+ * Uses the send function and prints an appropriate message if sending was 
  * unsuccessful.
  * 
  * socket_fd: socket file descriptor.
  * message[]: the message to send.
  * message_len: length of message[].
- * *address: destination address.
- * addr_len: size of destination address.
  */
-
 void send_to(int socket_fd, char message[], int message_len)
 {
     int bytes_sent;
@@ -241,6 +130,13 @@ void send_to(int socket_fd, char message[], int message_len)
     }
 }
 
+/*
+ * Function: get_command
+ * ---------------------------
+ * Uses fgets to get a command from stdin, terminates the command appropriately.
+ * 
+ * *buffer: where the command will be stored. 
+ */
 void get_command(char *buffer)
 {
     fgets(buffer, MAX_COMMAND_SIZE, stdin);
@@ -248,6 +144,13 @@ void get_command(char *buffer)
     __fpurge(stdin);  
 }
 
+/*
+ * Function: get_username
+ * ---------------------------
+ * Uses fgets to get a username from stdin.
+ * 
+ * *buffer: where the username will be stored. 
+ */
 void get_username(char *buffer)
 {
     fgets(buffer, MAX_USERNAME, stdin);
@@ -260,6 +163,13 @@ void get_username(char *buffer)
     __fpurge(stdin);
 }
 
+/*
+ * Function: get_password
+ * --------------------------
+ * Uses fgets to get a password from stdin.
+ * 
+ * *buffer: where the password will be stored. 
+ */
 void get_password(char *buffer)
 {
     fgets(buffer, MAX_PASSWORD, stdin);
@@ -272,18 +182,38 @@ void get_password(char *buffer)
     __fpurge(stdin);
 }
 
+/*
+ * Function: get_message
+ * --------------------------
+ * Uses fgets to get a message from stdin, it is terminated appropriately.
+ * Marks the message with the name of the sending user.
+ * 
+ * *buffer: where the message will be stored.
+ */
 void get_message(char *buffer)
 {
-    fgets(buffer, MAXBUFFERSIZE - 1, stdin);
-    while(strlen(buffer) < 2)
+    buffer[0] = '\0';
+    sprintf(buffer, "%s: ", this_user);
+    buffer[strlen(buffer)] = '\0';
+    char message[MAXBUFFERSIZE];
+    fgets(message, MAXBUFFERSIZE - 1, stdin);
+    while(strlen(message) < 2)
     {
         printf("Message must be at least one character. Try again:\n");
-        fgets(buffer, MAXBUFFERSIZE - 1, stdin);
+        fgets(message, MAXBUFFERSIZE - 1, stdin);
     }
+    strcat(buffer, message);
     buffer[strlen(buffer) - 1] = 'D';
     __fpurge(stdin);
 }
 
+/*
+ * Function: public_message
+ * -----------------------------
+ * Handles the PM command from the user.
+ * 
+ * socket_fd: used to send and receive messages to/from the server. 
+ */
 void public_message(int socket_fd)
 {
     send_to(socket_fd, PUBLIC_MESSAGE, strlen(PUBLIC_MESSAGE));
@@ -315,6 +245,13 @@ void public_message(int socket_fd)
     free(message);
 }
 
+/*
+ * Function: direct_message
+ * -----------------------------
+ * Handles the DM command from the user.
+ * 
+ * socket_fd: used to send and receive messages to/from the server. 
+ */
 void direct_message(int socket_fd)
 {
     send_to(socket_fd, DIRECT_MESSAGE, strlen(DIRECT_MESSAGE));
@@ -382,6 +319,16 @@ void direct_message(int socket_fd)
     }
 }
 
+/*
+ * Function: command_handler
+ * --------------------------------
+ * Used exclusively by the command handling thread.
+ * Gets and processes commands appropriately.
+ * 
+ * *p_client_fd: pointer to the socket used to communicate.
+ * 
+ * returns: a void pointer.
+ */
 void *command_handler(void *p_client_fd)
 {
     int socket_fd = * (int *) p_client_fd;
@@ -424,7 +371,6 @@ int main(int argc, char *argv[])
         exit(1);
     }
 
-    char username[MAX_USERNAME];
     char password[MAX_PASSWORD];
     char command[MAX_COMMAND_SIZE];
     int socket_fd;
@@ -440,11 +386,13 @@ int main(int argc, char *argv[])
         exit(1);
     }
 
+    // Handle user creation
+
     printf("Connected.\nEnter username:\n");
 
-    get_username(username);
+    get_username(this_user);
 
-    send_to(socket_fd, username, strlen(username));
+    send_to(socket_fd, this_user, strlen(this_user));
     receive(socket_fd, command, MAX_COMMAND_SIZE - 1);
 
     if(strcmp(command, USER_NOT_FOUND) == 0)
@@ -483,8 +431,9 @@ int main(int argc, char *argv[])
     }
 
     pthread_t thread;
-    void *return_val;
+    void *return_val; // Return value when thread joins
 
+    // Start command handler thread
     if (pthread_create(&thread, NULL, command_handler, &socket_fd) != 0)
     {
         perror("Thread create error.");
@@ -492,6 +441,8 @@ int main(int argc, char *argv[])
     }
 
     int bytes_received = 0;
+
+    // Continuously receive messages, put them in the queue if they are command messages
     while(stay_alive)
     {
         char *message = malloc(MAXBUFFERSIZE);
@@ -504,22 +455,17 @@ int main(int argc, char *argv[])
                 printf("\n--INCOMING MESSAGE--\n%s\n\nContinue input:\n", message);
                 free(message);
             }
-            else //if(message[bytes_received - 1] == 'C')
+            else
             {
                 message[bytes_received] = '\0';
                 fifoadd(message);
             }
-            // else
-            // {
-            //     //message[bytes_received] = '\0';
-            //     printf("Shouldn't be here..\n");
-            //     free(message);
-            // }
         }
         else
         {
             printf("Connection ended.\n");
             stay_alive = 0;
+            close(socket_fd);
         }
     }
 
@@ -528,14 +474,5 @@ int main(int argc, char *argv[])
         perror("Thread join error.");
         exit(3);
     }
-
-    // for(int i = 0; i < MAX_COMMANDS_BUFFER; i++)
-    // {
-    //     if (circular_command_fifo[i] != NULL)
-    //     {
-    //         free(circular_command_fifo[i]);
-    //     }
-    // }
-
     return 0;
 }

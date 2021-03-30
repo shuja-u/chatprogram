@@ -2,17 +2,15 @@
  * Shuja Uddin
  * sm2849sr
  * 
- * This file contains functions that are used by both the server and the 
- * client.
+ * This file contains a function that is used by both the server and the client.
  */
 
 #include "helper.h"
 
 /*
- * Function: create_bind_socket
+ * Function: socket_helper
  * ----------------------------
- * Creates and binds a socket. It can also be used to just create a socket 
- * without binding it.
+ * Creates and binds/connects a socket.
  * 
  * *socket_fd: the socket file descriptor will be stored here once the 
  *             function creates it.
@@ -24,7 +22,6 @@
  * 
  * returns: a sockaddr struct that contains socket address information. 
  */
-
 struct sockaddr socket_helper(int *socket_fd, int family, int socket_type,
                                    int flag, char address[], char port[])
 {
@@ -77,6 +74,7 @@ struct sockaddr socket_helper(int *socket_fd, int family, int socket_type,
         {
             close(*socket_fd);
             perror("Couldn't connect");
+            continue;
         }
         break;
     }
@@ -90,67 +88,4 @@ struct sockaddr socket_helper(int *socket_fd, int family, int socket_type,
     result = *next->ai_addr;
     freeaddrinfo(addrinfo_list);
     return result;
-}
-
-/*
- * Function: receive_from
- * ----------------------
- * Uses the recvfrom function and marks the end of the received message. 
- * Additionally, if the process was unsuccessful, it will print the 
- * appropriate message and exit the program.
- * 
- * socket_fd: socket file descriptor.
- * message[]: where the received message will be stored.
- * message_len: how much message[] can hold.
- * *address: this is where the source address will be stored.
- * *addr_len: size of the source address will be stored here.
- */
-
-void receive_from(int socket_fd, char message[], int message_len,
-                  struct sockaddr *address, socklen_t *addr_len)
-{
-    int bytes_received;
-    if ((bytes_received = recvfrom(socket_fd, message, message_len, 0,
-                                   address, addr_len)) == -1)
-    {
-        perror("Unable to receive");
-        exit(1);
-    }
-
-    message[bytes_received] = '\0';
-}
-
-/*
- * Function: send_to
- * -----------------
- * Uses the sendto function and prints an appropriate message if sending was 
- * unsuccessful.
- * 
- * socket_fd: socket file descriptor.
- * message[]: the message to send.
- * message_len: length of message[].
- * *address: destination address.
- * addr_len: size of destination address.
- */
-
-void send_to(int socket_fd, char message[], int message_len,
-             struct sockaddr *address, socklen_t addr_len)
-{
-    int bytes_sent;
-    if ((bytes_sent = sendto(socket_fd, message, message_len, 0, address,
-                             addr_len)) == -1)
-    {
-        perror("Unable to send");
-        exit(1);
-    }
-}
-
-void sigchld_handler(int s)
-{
-    // waitpid() might overwrite errno, so we save and restore it:
-    int saved_errno = errno;
-
-    while(waitpid(-1, NULL, WNOHANG) > 0);
-
-    errno = saved_errno;
 }
