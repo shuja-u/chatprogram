@@ -1,14 +1,11 @@
-The directory contains the following files:
-chatServer.c
-chatClient.c
-helper.c
-helper.h
-Makefile
+This is a project for ICS 460 at Metropolitan State University.
+
+A rudimentary chat program for POSIX compliant systems.
 
 Instructions:
-1. Ensure "gcc" is installed.
-2. Ensure "make" is installed.
-3. Open the terminal in the same directory as the Makefile and type "make".
+1. Ensure "gcc" is installed. (installation instructions are at the end)
+2. Ensure "make" is installed. (installation instructions are at the end)
+3. Open the terminal in the same directory as the Makefile and type "make" to compile.
 
 To run the server:
 1. Open the terminal in the same directory as the Makefile

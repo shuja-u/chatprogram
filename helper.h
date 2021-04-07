@@ -18,7 +18,6 @@
 
 #define MAXBUFFERSIZE 2050
 #define BACKLOG 20
-#define MAX_ONLINE_USERS 20
 #define TABLE_SIZE 100
 #define MAX_USERNAME 51
 #define MAX_PASSWORD 101
@@ -37,6 +36,6 @@
 #define MESSAGE_SENT "MSC"
 #define NO_ACTIVE_USERS "NAUC"
 #define MAX_COMMAND_SIZE 5
-#define MAX_COMMANDS_BUFFER 50
+#define MAX_COMMANDS_BUFFER 25
 
 struct sockaddr socket_helper(int *socket_fd, int family, int socket_type, int flag, char address[], char port[]);
