@@ -18,8 +18,7 @@ To use the client:
    Example: ./chatClient localhost 6500 user1
 
 Installation commands (for most Debian/Ubuntu based distros):
-sudo apt install gcc
-sudo apt install make
+sudo apt install gcc make
 
 Resources consulted:
 https://linux.die.net/man/3/pthread_mutex_lock
