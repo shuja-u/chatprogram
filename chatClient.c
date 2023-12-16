@@ -361,6 +361,7 @@ void *command_handler(void *p_client_fd)
             printf("--INVALID COMMAND--\n");
         }
     }
+    return NULL;
 }
 
 int main(int argc, char *argv[])
